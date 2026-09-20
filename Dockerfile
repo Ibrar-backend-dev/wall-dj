@@ -13,6 +13,17 @@ COPY . .
 # Baked into the image so the running container serves the admin's CSS.
 RUN python manage.py collectstatic --noinput
 
-# Shell form: $PORT is injected by Railway at runtime.
+# Railway reads EXPOSE to work out which port to route the public domain to.
+# Without it a Dockerfile service gets "Application failed to respond" even
+# though gunicorn is up, because the edge is talking to the wrong port.
+EXPOSE 8080
+
+# Shell form so ${PORT} expands; exec so gunicorn becomes PID 1 and receives
+# Railway's SIGTERM directly instead of it stopping at /bin/sh.
 CMD python manage.py migrate --noinput && \
-    gunicorn config.wsgi:application --bind 0.0.0.0:${PORT:-8000} --workers 1 --timeout 60
+    exec gunicorn config.wsgi:application \
+        --bind 0.0.0.0:${PORT:-8080} \
+        --workers 1 \
+        --timeout 60 \
+        --access-logfile - \
+        --error-logfile -

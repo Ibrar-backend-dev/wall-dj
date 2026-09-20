@@ -9,6 +9,10 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 env = environ.Env(
     DEBUG=(bool, False),
     ALLOWED_HOSTS=(list, ["localhost", "127.0.0.1"]),
+    CSRF_TRUSTED_ORIGINS=(list, []),
+    RAILWAY_PUBLIC_DOMAIN=(str, ""),
+    SECURE_SSL_REDIRECT=(bool, False),
+    SECURE_HSTS_SECONDS=(int, 0),
     USE_LOCAL_MEDIA=(bool, True),
     B2_ENDPOINT=(str, ""),
     B2_REGION=(str, ""),
@@ -22,6 +26,40 @@ environ.Env.read_env(BASE_DIR / ".env")
 SECRET_KEY = env("SECRET_KEY", default="dev-only-insecure-key-change-me")
 DEBUG = env("DEBUG")
 ALLOWED_HOSTS = env("ALLOWED_HOSTS")
+CSRF_TRUSTED_ORIGINS = env("CSRF_TRUSTED_ORIGINS")
+
+# --- Railway -------------------------------------------------------------
+# Railway injects RAILWAY_PUBLIC_DOMAIN at runtime, so the deployed host does
+# not have to be known (or redeployed) when the domain changes.
+RAILWAY_PUBLIC_DOMAIN = env("RAILWAY_PUBLIC_DOMAIN")
+if RAILWAY_PUBLIC_DOMAIN:
+    ALLOWED_HOSTS = [
+        *ALLOWED_HOSTS,
+        RAILWAY_PUBLIC_DOMAIN,
+        # Railway's deploy health check calls the app with this Host header;
+        # without it the check gets a 400 and the deploy is rolled back.
+        "healthcheck.railway.app",
+    ]
+    CSRF_TRUSTED_ORIGINS = [*CSRF_TRUSTED_ORIGINS, f"https://{RAILWAY_PUBLIC_DOMAIN}"]
+
+# Railway terminates TLS at its edge and forwards plain HTTP inward. Without
+# this Django reads every request as insecure: admin login over https fails the
+# CSRF origin check, and build_absolute_uri() would put http:// into file_path.
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+USE_X_FORWARDED_HOST = True
+
+if not DEBUG:
+    # The admin session is the only thing worth stealing here, and in
+    # production it is always reached over https.
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    # Both of the following stay opt-in. A blanket redirect can make Railway's
+    # health check follow a 301 and fail the deploy, and HSTS is effectively
+    # irreversible for the length of its max-age - turn them on deliberately,
+    # once a custom domain is settled and serving https only.
+    SECURE_SSL_REDIRECT = env("SECURE_SSL_REDIRECT")
+    SECURE_REDIRECT_EXEMPT = [r"^api/v1/wallpapers/categories/?$"]
+    SECURE_HSTS_SECONDS = env("SECURE_HSTS_SECONDS")
 
 INSTALLED_APPS = [
     "django.contrib.admin",
@@ -37,6 +75,9 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    # Railway runs no separate web server, so WhiteNoise serves the admin's
+    # static files straight from the app process.
+    "whitenoise.middleware.WhiteNoiseMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
@@ -105,7 +146,7 @@ MEDIA_ROOT = BASE_DIR / "media"
 if USE_LOCAL_MEDIA:
     STORAGES = {
         "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
-        "staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"},
+        "staticfiles": {"BACKEND": "whitenoise.storage.CompressedStaticFilesStorage"},
     }
 else:
     # Backblaze B2 through its S3-compatible API.
@@ -126,7 +167,7 @@ else:
 
     STORAGES = {
         "default": {"BACKEND": "storages.backends.s3.S3Storage"},
-        "staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"},
+        "staticfiles": {"BACKEND": "whitenoise.storage.CompressedStaticFilesStorage"},
     }
 
 # --- DRF -----------------------------------------------------------------

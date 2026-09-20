@@ -50,6 +50,23 @@
       "modified": 1758326400000
     },
     {
+      "_id": "env_prod",
+      "_type": "environment",
+      "parentId": "env_base",
+      "name": "Production (Railway)",
+      "data": {
+        "scheme": "https",
+        "host": "REPLACE-ME.up.railway.app",
+        "base_url": "{{ _.scheme }}://{{ _.host }}"
+      },
+      "dataPropertyOrder": { "&": ["scheme", "host", "base_url"] },
+      "color": "#c9704a",
+      "isPrivate": false,
+      "metaSortKey": 2,
+      "created": 1758326400000,
+      "modified": 1758326400000
+    },
+    {
       "_id": "jar_wallpaper",
       "_type": "cookie_jar",
       "parentId": "wrk_wallpaper_api",

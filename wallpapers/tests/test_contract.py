@@ -34,6 +34,7 @@ WALLPAPER_KEYS = [
     "original_filename",
     "file_path",
     "created_at",
+    "thumbnail_path",
 ]
 META_KEYS = ["page", "page_size", "total", "has_next"]
 

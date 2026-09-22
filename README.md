@@ -26,14 +26,19 @@ when blank; `artwork_count` counts published items only. Categories carry no thu
 
 ### Wallpaper row
 
-`media_type, is_premium, title, id, category_id, original_filename, file_path, created_at`
-— in that order, which is deliberate and not alphabetical.
+`media_type, is_premium, title, id, category_id, original_filename, file_path, created_at,
+thumbnail_path` — in that order, which is deliberate and not alphabetical.
 
 - `file_path` is an **absolute** url. Load it directly; prefixing it with the base url
-  gives a doubled address and a broken image. There is no thumbnail or preview url.
+  gives a doubled address and a broken image.
 - `media_type` is lowercase `image`, `gif` or `video`, derived from the uploaded file.
-- `title` is `null` for an unnamed item — it never falls back to the filename.
+- `title` may be `null`, and the API never derives it — there is no filename fallback
+  in the read path. Admin uploads do set it at creation, from the file's own name with
+  the extension stripped; clearing it on the change form puts the row back to `null`.
 - `created_at` is naive UTC with microseconds, e.g. `2026-08-23T10:48:52.245000`.
+- `thumbnail_path` is the poster frame for a video, absolute like `file_path`. It is
+  `null` unless someone attached one in the admin — only videos may have one, and it is
+  never generated. Images and gifs always serve `null` here; render them from `file_path`.
 
 ### Query parameters
 
@@ -58,7 +63,9 @@ cp .env.example .env                              # then edit it
 .venv/Scripts/python manage.py runserver 0.0.0.0:8000
 ```
 
-Add a category and upload files at `/admin/`, then hit the endpoints above.
+Add a category at `/admin/`, then upload files to it — up to 10 per submit, one
+wallpaper per file, each published at priority 0 and titled after its filename. Then hit
+the endpoints above.
 
 ## Deploying to Railway
 

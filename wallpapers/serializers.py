@@ -26,6 +26,7 @@ class WallpaperSerializer(serializers.ModelSerializer):
     category_id = serializers.IntegerField(read_only=True)
     file_path = serializers.SerializerMethodField()
     created_at = NaiveUTCDateTimeField(read_only=True)
+    thumbnail_path = serializers.SerializerMethodField()
 
     class Meta:
         model = Wallpaper
@@ -38,17 +39,27 @@ class WallpaperSerializer(serializers.ModelSerializer):
             "original_filename",
             "file_path",
             "created_at",
+            # Appended deliberately: the eight keys above keep the positions
+            # existing clients already parse.
+            "thumbnail_path",
         )
 
     def get_file_path(self, obj) -> str | None:
+        return self._absolute(obj.file)
+
+    def get_thumbnail_path(self, obj) -> str | None:
+        """Null unless a video has been given one - never derived from the file."""
+        return self._absolute(obj.thumbnail)
+
+    def _absolute(self, filefield) -> str | None:
         """Always an absolute, directly loadable url.
 
         Under B2 the storage backend already returns one; the local-media
         fallback returns /media/... which we absolutize against the request.
         """
-        if not obj.file:
+        if not filefield:
             return None
-        url = obj.file.url
+        url = filefield.url
         if settings.USE_LOCAL_MEDIA:
             request = self.context.get("request")
             if request is not None:

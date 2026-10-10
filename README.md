@@ -9,7 +9,7 @@ All are public GETs under `/api/v1/`, JSON only.
 
 | # | Endpoint | Notes |
 |---|---|---|
-| 1 | `GET /api/v1/wallpapers/categories` | Active categories, ordered `position` then `name` |
+| 1 | `GET /api/v1/wallpapers/categories` | Active categories, newest first (descending `id`) |
 | 2 | `GET /api/v1/wallpapers` | Published items, priority first then newest |
 | 3 | `GET /api/v1/wallpapers?category_id=N` | Same endpoint, one filter, identical row shape |
 
@@ -26,19 +26,23 @@ when blank; `artwork_count` counts published items only. Categories carry no thu
 
 ### Wallpaper row
 
-`media_type, is_premium, title, id, category_id, original_filename, file_path, created_at,
-thumbnail_path` — in that order, which is deliberate and not alphabetical.
+`id, category_id, media_type, is_premium, title, artwork, created_at, thumbnail_path`
+— in that order, which is deliberate and not alphabetical. `original_filename` is recorded
+on upload and searchable in the admin, but is not part of the row.
 
-- `file_path` is an **absolute** url. Load it directly; prefixing it with the base url
+- `artwork` is the full-size file as an **absolute** url. Load it directly; prefixing it
+  with the base url
   gives a doubled address and a broken image.
 - `media_type` is lowercase `image`, `gif` or `video`, derived from the uploaded file.
-- `title` may be `null`, and the API never derives it — there is no filename fallback
-  in the read path. Admin uploads do set it at creation, from the file's own name with
-  the extension stripped; clearing it on the change form puts the row back to `null`.
+- `title` is never `null`. Left unset it falls back to the name the file was uploaded
+  under, with the extension stripped, so `beach sunset.png` becomes `beach sunset`.
+  Clearing it on the change form restores that fallback rather than emptying it.
 - `created_at` is naive UTC with microseconds, e.g. `2026-08-23T10:48:52.245000`.
-- `thumbnail_path` is the poster frame for a video, absolute like `file_path`. It is
-  `null` unless someone attached one in the admin — only videos may have one, and it is
-  never generated. Images and gifs always serve `null` here; render them from `file_path`.
+- `thumbnail_path` is a small stand-in for the full file, absolute like `artwork`.
+  An **image** gets one generated on upload: a WebP shrunk until it fits within a third of
+  the original's file size, which lands around 3-4x smaller. A **video** cannot be processed
+  without ffmpeg, so its poster frame is uploaded by hand in the admin and is `null` until
+  someone does. **Gifs** serve `null`. A thumbnail chosen by hand is never overwritten.
 
 ### Query parameters
 
@@ -93,7 +97,7 @@ before the final domain is known.
 
 **`USE_LOCAL_MEDIA` must be `False` in production.** Railway's filesystem is ephemeral,
 so anything uploaded through the admin in local-media mode disappears on the next deploy
-and every `file_path` 404s.
+and every `artwork` url 404s.
 
 Two hardening settings stay opt-in because both can bite on first deploy:
 `SECURE_SSL_REDIRECT` (Railway's health check can fail on the 301) and
@@ -114,7 +118,7 @@ Then open `https://<your-domain>/admin/` to add categories and upload files.
 
 ## Storage
 
-`USE_LOCAL_MEDIA=True` (the default) keeps files in `./media` and builds `file_path` from
+`USE_LOCAL_MEDIA=True` (the default) keeps files in `./media` and builds `artwork` from
 the request host, so the API runs with no B2 credentials.
 
 Set it to `False` and fill the `B2_*` values to switch to Backblaze B2, which is driven

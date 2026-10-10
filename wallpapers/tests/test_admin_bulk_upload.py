@@ -28,11 +28,38 @@ UPLOAD_PATH = re.compile(
 )
 
 
+def photo(width=1200, height=1800):
+    """A PNG big enough that a third of its bytes is a real constraint."""
+    import random
+    from io import BytesIO
+
+    from PIL import Image
+
+    # Noise, so the source PNG cannot be compressed away to nothing - it makes
+    # the "a third of the bytes" budget an actual constraint.
+    random.seed(1)
+    image = Image.frombytes(
+        "RGB", (width, height), random.randbytes(width * height * 3)
+    )
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
 def png(name="shot.png"):
     return SimpleUploadedFile(name, PNG, content_type="image/png")
 
 
-@override_settings(MEDIA_ROOT=_TEMP_MEDIA, USE_LOCAL_MEDIA=True)
+@override_settings(
+    MEDIA_ROOT=_TEMP_MEDIA,
+    USE_LOCAL_MEDIA=True,
+    # STORAGES is built once at settings import, so USE_LOCAL_MEDIA alone does
+    # not undo a B2 .env - without this the suite uploads to the real bucket.
+    STORAGES={
+        "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+        "staticfiles": {"BACKEND": "whitenoise.storage.CompressedStaticFilesStorage"},
+    },
+)
 class BulkUploadTests(TestCase):
     @classmethod
     def setUpTestData(cls):
@@ -237,9 +264,18 @@ class BulkUploadTests(TestCase):
         self.assertEqual(wallpaper.original_filename, "keep.png")
 
 
-@override_settings(MEDIA_ROOT=_TEMP_MEDIA, USE_LOCAL_MEDIA=True)
+@override_settings(
+    MEDIA_ROOT=_TEMP_MEDIA,
+    USE_LOCAL_MEDIA=True,
+    # STORAGES is built once at settings import, so USE_LOCAL_MEDIA alone does
+    # not undo a B2 .env - without this the suite uploads to the real bucket.
+    STORAGES={
+        "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+        "staticfiles": {"BACKEND": "whitenoise.storage.CompressedStaticFilesStorage"},
+    },
+)
 class VideoThumbnailTests(TestCase):
-    """The thumbnail is the user's choice: optional, videos only, never derived."""
+    """Images derive a thumbnail; a video's is uploaded by hand."""
 
     @classmethod
     def setUpTestData(cls):
@@ -296,9 +332,33 @@ class VideoThumbnailTests(TestCase):
             path, r"/media/wallpaper/anime/thumbs/\d{4}/\d{2}/[0-9a-f]{32}\.png$"
         )
 
-    def test_images_still_report_a_null_thumbnail(self):
-        self.make(payload=PNG, name="shot.png", content_type="image/png")
+    def test_an_image_derives_its_own_thumbnail(self):
+        wallpaper = self.make(payload=photo(), name="shot.png", content_type="image/png")
+
+        self.assertTrue(wallpaper.thumbnail)
+        self.assertTrue(wallpaper.thumbnail.name.endswith(".webp"))
+        self.assertIsNotNone(self.feed()[0]["thumbnail_path"])
+
+    def test_a_derived_thumbnail_is_at_most_a_third_of_the_upload(self):
+        payload = photo()
+        wallpaper = self.make(payload=payload, name="shot.png", content_type="image/png")
+
+        self.assertLessEqual(wallpaper.thumbnail.size, len(payload) // 3)
+
+    def test_a_video_derives_nothing(self):
+        # No ffmpeg, so a video's poster frame stays a manual upload.
+        wallpaper = self.make()
+        self.assertFalse(wallpaper.thumbnail)
         self.assertIsNone(self.feed()[0]["thumbnail_path"])
+
+    def test_a_hand_picked_thumbnail_is_never_overwritten(self):
+        chosen = SimpleUploadedFile("poster.png", PNG, content_type="image/png")
+        wallpaper = Wallpaper.objects.create(
+            category=self.anime,
+            file=SimpleUploadedFile("shot.png", photo(), content_type="image/png"),
+            thumbnail=chosen,
+        )
+        self.assertTrue(wallpaper.thumbnail.name.endswith(".png"))
 
     # --- the admin form -----------------------------------------------
 
@@ -320,17 +380,16 @@ class VideoThumbnailTests(TestCase):
         wallpaper.refresh_from_db()
         self.assertTrue(wallpaper.thumbnail)
 
-    def test_an_image_is_refused_a_thumbnail(self):
-        wallpaper = self.make(payload=PNG, name="shot.png", content_type="image/png")
+    def test_an_image_also_accepts_a_chosen_thumbnail(self):
+        wallpaper = self.make(payload=photo(), name="shot.png", content_type="image/png")
         response = self.change(
             wallpaper,
             thumbnail=SimpleUploadedFile("poster.png", PNG, content_type="image/png"),
         )
 
-        self.assertEqual(response.status_code, 200)  # re-rendered with the error
-        self.assertContains(response, "Only videos take a thumbnail")
+        self.assertEqual(response.status_code, 302)
         wallpaper.refresh_from_db()
-        self.assertFalse(wallpaper.thumbnail)
+        self.assertTrue(wallpaper.thumbnail.name.endswith(".png"))
 
     def test_a_video_thumbnail_must_be_a_still_image(self):
         wallpaper = self.make()

@@ -42,7 +42,7 @@ class CategoryListView(FeedView):
                     filter=Q(wallpapers__is_published=True),
                 )
             )
-            .order_by("id")
+            .order_by("-id")
         )
 
 

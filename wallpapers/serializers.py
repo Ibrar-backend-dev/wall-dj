@@ -24,27 +24,24 @@ class CategorySerializer(serializers.ModelSerializer):
 class WallpaperSerializer(serializers.ModelSerializer):
     # Reads the FK column straight off the instance - no join.
     category_id = serializers.IntegerField(read_only=True)
-    file_path = serializers.SerializerMethodField()
+    artwork = serializers.SerializerMethodField()
     created_at = NaiveUTCDateTimeField(read_only=True)
     thumbnail_path = serializers.SerializerMethodField()
 
     class Meta:
         model = Wallpaper
         fields = (
+            "id",
+            "category_id",
             "media_type",
             "is_premium",
             "title",
-            "id",
-            "category_id",
-            "original_filename",
-            "file_path",
+            "artwork",
             "created_at",
-            # Appended deliberately: the eight keys above keep the positions
-            # existing clients already parse.
             "thumbnail_path",
         )
 
-    def get_file_path(self, obj) -> str | None:
+    def get_artwork(self, obj) -> str | None:
         return self._absolute(obj.file)
 
     def get_thumbnail_path(self, obj) -> str | None:

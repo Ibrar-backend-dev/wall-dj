@@ -7,12 +7,15 @@ row created from the admin, a shell or a future import all look identical.
 import os
 import uuid
 
-from django.core.exceptions import ValidationError
 from django.db import models
 from django.utils import timezone
 from django.utils.text import slugify
 
-from .validators import validate_media_extension, validate_thumbnail_extension
+from .thumbnails import build_thumbnail
+from .validators import (
+    validate_media_extension,
+    validate_thumbnail_extension,
+)
 
 
 class MediaType(models.TextChoices):
@@ -130,8 +133,8 @@ class Wallpaper(models.Model):
         blank=True,
         null=True,
         help_text=(
-            "Set from the filename on upload. Clear it to serve null - "
-            "the API never derives a title of its own."
+            "Defaults to the uploaded file's own name. Clearing it does not "
+            "give an empty title - it falls back to that name again."
         ),
     )
     file = models.FileField(
@@ -145,9 +148,9 @@ class Wallpaper(models.Model):
         blank=True,
         null=True,
         help_text=(
-            "Videos only, and entirely optional - the poster frame the app shows "
-            "before playback. jpeg, png or webp. Served as thumbnail_path, null "
-            "when unset."
+            "Generated automatically for an image, at roughly a third of its "
+            "file size. A video cannot be processed without ffmpeg, so upload "
+            "its poster frame here by hand. Served as thumbnail_path."
         ),
     )
     media_type = models.CharField(
@@ -186,28 +189,37 @@ class Wallpaper(models.Model):
     def __str__(self) -> str:
         return self.title or self.original_filename or f"Wallpaper #{self.pk}"
 
-    def clean(self):
-        """Only a video may carry a thumbnail.
-
-        An image or a gif already renders from ``file_path``, so a second
-        image there is dead weight the API would have to serve. Derived from
-        the file rather than ``self.media_type``, because media_type is only
-        recomputed in save() - on a change form the field still holds the old
-        value while the new file is sitting in front of us.
-        """
-        super().clean()
-        if self.thumbnail and self.file and media_type_for(self.file.name) != MediaType.VIDEO:
-            raise ValidationError(
-                {"thumbnail": "Only videos take a thumbnail - this item is not a video."}
-            )
-
     def save(self, *args, **kwargs):
         if self.file:
             # _committed is False only while a freshly assigned upload is still
             # under its client-side name, which is the one worth keeping.
-            if not self.file._committed:
+            fresh_upload = not self.file._committed
+            if fresh_upload:
                 self.original_filename = os.path.basename(self.file.name)[:255]
             self.media_type = media_type_for(self.file.name)
+            if fresh_upload and self.media_type == MediaType.IMAGE and not self.thumbnail:
+                self._build_thumbnail()
         if not self.title:
-            self.title = None
+            # Never blank: an untitled item falls back to the name it was
+            # uploaded under, so the app always has something to show. Derived
+            # here rather than in the serializer, so a row made from the admin,
+            # a shell or an import all look the same.
+            self.title = title_from_filename(self.original_filename or "") or None
         super().save(*args, **kwargs)
+
+    def _build_thumbnail(self):
+        """Derive a thumbnail for an image, a third of the upload's size.
+
+        Only for images, and only when nobody supplied one: a video needs
+        ffmpeg to produce a poster frame, so its thumbnail stays a manual
+        upload, and a hand-picked thumbnail is never overwritten.
+        """
+        thumbnail = build_thumbnail(
+            self.file.file,
+            self.file.size,
+            name=f"{os.path.splitext(os.path.basename(self.file.name))[0]}.webp",
+        )
+        if thumbnail is not None:
+            # save=False: this instance has not been written yet, and the outer
+            # save() is about to commit both files together.
+            self.thumbnail.save(thumbnail.name, thumbnail, save=False)

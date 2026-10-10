@@ -26,13 +26,12 @@ HOST = "192.168.18.8:8000"
 
 CATEGORY_KEYS = ["id", "name", "description", "position", "artwork_count"]
 WALLPAPER_KEYS = [
+    "id",
+    "category_id",
     "media_type",
     "is_premium",
     "title",
-    "id",
-    "category_id",
-    "original_filename",
-    "file_path",
+    "artwork",
     "created_at",
     "thumbnail_path",
 ]
@@ -41,7 +40,16 @@ META_KEYS = ["page", "page_size", "total", "has_next"]
 _TEMP_MEDIA = tempfile.mkdtemp()
 
 
-@override_settings(MEDIA_ROOT=_TEMP_MEDIA, USE_LOCAL_MEDIA=True)
+@override_settings(
+    MEDIA_ROOT=_TEMP_MEDIA,
+    USE_LOCAL_MEDIA=True,
+    # STORAGES is built once at settings import, so USE_LOCAL_MEDIA alone does
+    # not undo a B2 .env - without this the suite uploads to the real bucket.
+    STORAGES={
+        "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+        "staticfiles": {"BACKEND": "whitenoise.storage.CompressedStaticFilesStorage"},
+    },
+)
 class FeedContractTests(TestCase):
     @classmethod
     def setUpTestData(cls):
@@ -96,18 +104,22 @@ class FeedContractTests(TestCase):
         self.assertEqual(list(body["meta"]), META_KEYS)
         self.assertEqual(body["meta"], {"page": 1, "page_size": 20, "total": 2, "has_next": False})
 
-    def test_categories_are_active_only_and_ordered_by_id(self):
+    def test_categories_are_active_only_and_newest_first(self):
         _, body = self.get("/api/v1/wallpapers/categories")
-        self.assertEqual([c["id"] for c in body["data"]], [self.anime.id, self.nature.id])
+        # Descending id: the most recently added category leads the feed.
+        self.assertEqual([c["id"] for c in body["data"]], [self.nature.id, self.anime.id])
 
     def test_artwork_count_counts_published_items_only(self):
         _, body = self.get("/api/v1/wallpapers/categories")
-        self.assertEqual(body["data"][0]["artwork_count"], 3)
-        self.assertEqual(body["data"][1]["artwork_count"], 0)  # holds only an unpublished item
+        rows = {c["id"]: c for c in body["data"]}
+        self.assertEqual(rows[self.anime.id]["artwork_count"], 3)
+        # Nature holds only an unpublished item.
+        self.assertEqual(rows[self.nature.id]["artwork_count"], 0)
 
     def test_blank_description_is_null(self):
         _, body = self.get("/api/v1/wallpapers/categories")
-        self.assertIsNone(body["data"][1]["description"])
+        rows = {c["id"]: c for c in body["data"]}
+        self.assertIsNone(rows[self.nature.id]["description"])
 
     def test_categories_carry_no_thumbnail(self):
         _, body = self.get("/api/v1/wallpapers/categories")
@@ -137,16 +149,27 @@ class FeedContractTests(TestCase):
             [self.w_mp4.id, self.w_gif.id, self.w_png.id],
         )
 
-    def test_untitled_item_serves_null_not_the_filename(self):
+    def test_an_untitled_item_falls_back_to_its_filename(self):
         _, body = self.get("/api/v1/wallpapers")
         row = next(r for r in body["data"] if r["id"] == self.w_mp4.id)
-        self.assertIsNone(row["title"])
-        self.assertEqual(row["original_filename"], "clip.mp4")
+        # Uploaded as clip.mp4 with no title given.
+        self.assertEqual(row["title"], "clip")
 
-    def test_original_filename_survives_the_storage_rename(self):
+    def test_clearing_a_title_restores_the_filename(self):
+        self.w_png.title = ""
+        self.w_png.save()
+        self.assertEqual(self.w_png.title, "my shot")
+
+    def test_no_row_ever_serves_a_null_title(self):
         _, body = self.get("/api/v1/wallpapers")
-        row = next(r for r in body["data"] if r["id"] == self.w_png.id)
-        self.assertEqual(row["original_filename"], "my shot.png")
+        self.assertTrue(all(r["title"] for r in body["data"]))
+
+    def test_original_filename_is_kept_but_never_served(self):
+        # Still recorded for the admin's search and __str__; deliberately not
+        # part of the row the app parses.
+        self.assertEqual(self.w_png.original_filename, "my shot.png")
+        _, body = self.get("/api/v1/wallpapers")
+        self.assertNotIn("original_filename", body["data"][0])
 
     def test_media_type_is_derived_and_lowercase(self):
         _, body = self.get("/api/v1/wallpapers")
@@ -155,11 +178,11 @@ class FeedContractTests(TestCase):
         self.assertEqual(by_id[self.w_gif.id], "gif")
         self.assertEqual(by_id[self.w_png.id], "image")
 
-    def test_file_path_is_absolute_and_follows_the_upload_layout(self):
+    def test_artwork_is_absolute_and_follows_the_upload_layout(self):
         _, body = self.get("/api/v1/wallpapers")
         row = next(r for r in body["data"] if r["id"] == self.w_png.id)
         self.assertRegex(
-            row["file_path"],
+            row["artwork"],
             r"^http://192\.168\.18\.8:8000/media/wallpaper/anime/assets/"
             r"\d{4}/\d{2}/[0-9a-f]{32}\.png$",
         )

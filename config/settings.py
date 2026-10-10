@@ -3,6 +3,7 @@
 from pathlib import Path
 
 import environ
+from django.core.exceptions import ImproperlyConfigured
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -20,6 +21,8 @@ env = environ.Env(
     B2_APP_KEY=(str, ""),
     B2_BUCKET=(str, ""),
     B2_CDN_DOMAIN=(str, ""),
+    B2_SIGNED_URLS=(bool, False),
+    B2_URL_EXPIRE_SECONDS=(int, 3600),
 )
 environ.Env.read_env(BASE_DIR / ".env")
 
@@ -156,13 +159,33 @@ else:
     AWS_SECRET_ACCESS_KEY = env("B2_APP_KEY")
     AWS_STORAGE_BUCKET_NAME = env("B2_BUCKET")
     AWS_S3_ADDRESSING_STYLE = "virtual"
-    # Public bucket: unsigned urls, so file_path stays clean and cacheable.
-    AWS_QUERYSTRING_AUTH = False
     AWS_S3_FILE_OVERWRITE = False
     AWS_DEFAULT_ACL = None
+    # Bypass machine-wide proxy variables for direct B2 uploads.  A stale
+    # localhost proxy otherwise makes botocore close the request before B2
+    # can respond.
+    AWS_S3_PROXIES = {}
+
+    # A public bucket serves plain urls that never expire, which is what the
+    # API contract promises. A private one has to sign every url instead:
+    # file_path then carries a signature and dies after B2_URL_EXPIRE_SECONDS,
+    # so it cannot be cached by the app or a CDN and must be re-fetched from
+    # the API before each use.
+    B2_SIGNED_URLS = env("B2_SIGNED_URLS")
+    AWS_QUERYSTRING_AUTH = B2_SIGNED_URLS
+    AWS_QUERYSTRING_EXPIRE = env("B2_URL_EXPIRE_SECONDS")
 
     _cdn_domain = env("B2_CDN_DOMAIN")
     if _cdn_domain:
+        if B2_SIGNED_URLS:
+            # storages builds the url from the custom domain and returns it
+            # unsigned (s3.py url()), so a CDN in front of a private bucket
+            # would serve 401s. Fail loudly rather than at request time.
+            raise ImproperlyConfigured(
+                "B2_CDN_DOMAIN cannot be combined with B2_SIGNED_URLS: urls "
+                "built from a custom domain are never signed. Use a public "
+                "bucket with the CDN, or drop the CDN."
+            )
         AWS_S3_CUSTOM_DOMAIN = _cdn_domain
 
     STORAGES = {

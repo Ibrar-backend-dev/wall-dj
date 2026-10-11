@@ -1,7 +1,7 @@
 # Wallpaper API
 
 Django + DRF + Postgres backend serving three public wallpaper feeds, with media on
-Backblaze B2 and Django admin as the only content-management surface.
+Cloudflare R2 and Django admin as the only content-management surface.
 
 ## Endpoints
 
@@ -89,15 +89,20 @@ before the final domain is known.
 | `DEBUG` | `False` |
 | `DATABASE_URL` | `${{ Postgres.DATABASE_URL }}` - a reference, not a pasted literal |
 | `USE_LOCAL_MEDIA` | `False` |
-| `B2_ENDPOINT` | e.g. `https://s3.us-west-004.backblazeb2.com` |
-| `B2_REGION` | e.g. `us-west-004` |
-| `B2_KEY_ID` / `B2_APP_KEY` / `B2_BUCKET` | from the B2 console; bucket must be public |
+| `R2_ACCOUNT_ID` | Cloudflare account ID |
+| `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` | R2 S3 API credentials |
+| `R2_BUCKET_NAME` | R2 bucket name |
+| `R2_ENDPOINT_URL` | `https://<account-id>.r2.cloudflarestorage.com` |
+| `R2_PUBLIC_BASE_URL` | Public HTTPS bucket URL, such as its `r2.dev` domain |
 | `ALLOWED_HOSTS` | only if you add a custom domain |
 | `CSRF_TRUSTED_ORIGINS` | only for a custom domain, with scheme: `https://example.com` |
 
 **`USE_LOCAL_MEDIA` must be `False` in production.** Railway's filesystem is ephemeral,
 so anything uploaded through the admin in local-media mode disappears on the next deploy
 and every `artwork` url 404s.
+
+Set `DATABASE_URL` to a reachable database URL. For Railway Postgres, use the service
+reference `${{ Postgres.DATABASE_URL }}` rather than copying a credential-bearing URL.
 
 Two hardening settings stay opt-in because both can bite on first deploy:
 `SECURE_SSL_REDIRECT` (Railway's health check can fail on the 301) and
@@ -119,12 +124,15 @@ Then open `https://<your-domain>/admin/` to add categories and upload files.
 ## Storage
 
 `USE_LOCAL_MEDIA=True` (the default) keeps files in `./media` and builds `artwork` from
-the request host, so the API runs with no B2 credentials.
+the request host, so the API runs with no object-storage credentials.
 
-Set it to `False` and fill the `B2_*` values to switch to Backblaze B2, which is driven
-through its S3-compatible API. The bucket must be **public**: responses carry unsigned,
-cacheable urls straight to B2 (or to `B2_CDN_DOMAIN`, if a CDN sits in front of it).
-Nothing else changes — uploads keep the same
+Set it to `False` and fill the `R2_*` values to switch to Cloudflare R2, which is driven
+through its S3-compatible API. `R2_ENDPOINT_URL` is the S3 API endpoint;
+`R2_PUBLIC_BASE_URL` must be the HTTPS public URL enabled for the bucket. R2 takes
+precedence when its environment values are configured. Legacy `B2_*` values are still
+supported when no R2 values are configured. The bucket must be **public**: responses
+carry unsigned, cacheable URLs through the public base URL (or the B2 CDN domain for a
+legacy B2 setup). Nothing else changes — uploads keep the same
 `wallpaper/<category>/assets/<YYYY>/<MM>/<uuid>.<ext>` layout.
 
 ## Tests
@@ -137,5 +145,5 @@ handling, the `created_at` format, ordering, and every 400 / empty-list edge cas
 ```
 
 It uses SQLite by default. To test against PostgreSQL instead, set `DATABASE_URL` to a
-reachable PostgreSQL URL first. Media goes to a temp directory during the run; B2 is
-never touched.
+reachable PostgreSQL URL first. Media goes to a temp directory during the run; remote
+object storage is never touched.

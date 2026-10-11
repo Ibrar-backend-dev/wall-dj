@@ -1,6 +1,7 @@
 """Django settings for the wallpaper API."""
 
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import environ
 from django.core.exceptions import ImproperlyConfigured
@@ -15,6 +16,13 @@ env = environ.Env(
     SECURE_SSL_REDIRECT=(bool, False),
     SECURE_HSTS_SECONDS=(int, 0),
     USE_LOCAL_MEDIA=(bool, True),
+    R2_ACCOUNT_ID=(str, ""),
+    R2_ACCESS_KEY_ID=(str, ""),
+    R2_SECRET_ACCESS_KEY=(str, ""),
+    R2_BUCKET_NAME=(str, ""),
+    R2_ENDPOINT_URL=(str, ""),
+    R2_PUBLIC_BASE_URL=(str, ""),
+    R2_REGION=(str, "auto"),
     B2_ENDPOINT=(str, ""),
     B2_REGION=(str, ""),
     B2_KEY_ID=(str, ""),
@@ -137,9 +145,9 @@ STATIC_ROOT = BASE_DIR / "staticfiles"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 # --- Media storage -------------------------------------------------------
-# USE_LOCAL_MEDIA lets the API run without B2 credentials. In that mode files
+# USE_LOCAL_MEDIA lets the API run without object-storage credentials. In that mode files
 # land in ./media and the serializer absolutizes file_path against the request;
-# with B2 the storage backend already hands us an absolute public url.
+# with object storage the backend already hands us an absolute public url.
 
 USE_LOCAL_MEDIA = env("USE_LOCAL_MEDIA")
 
@@ -152,41 +160,97 @@ if USE_LOCAL_MEDIA:
         "staticfiles": {"BACKEND": "whitenoise.storage.CompressedStaticFilesStorage"},
     }
 else:
-    # Backblaze B2 through its S3-compatible API.
-    AWS_S3_ENDPOINT_URL = env("B2_ENDPOINT")
-    AWS_S3_REGION_NAME = env("B2_REGION")
-    AWS_ACCESS_KEY_ID = env("B2_KEY_ID")
-    AWS_SECRET_ACCESS_KEY = env("B2_APP_KEY")
-    AWS_STORAGE_BUCKET_NAME = env("B2_BUCKET")
+    _r2_values = {
+        "account_id": env("R2_ACCOUNT_ID"),
+        "access_key_id": env("R2_ACCESS_KEY_ID"),
+        "secret_access_key": env("R2_SECRET_ACCESS_KEY"),
+        "bucket_name": env("R2_BUCKET_NAME"),
+        "endpoint_url": env("R2_ENDPOINT_URL"),
+        "public_base_url": env("R2_PUBLIC_BASE_URL"),
+    }
+    _use_r2 = any(_r2_values.values())
+
+    if _use_r2:
+        _storage_values = {
+            "endpoint_url": _r2_values["endpoint_url"]
+            or (
+                f"https://{_r2_values['account_id']}.r2.cloudflarestorage.com"
+                if _r2_values["account_id"]
+                else ""
+            ),
+            "region": env("R2_REGION"),
+            "access_key_id": _r2_values["access_key_id"],
+            "secret_access_key": _r2_values["secret_access_key"],
+            "bucket_name": _r2_values["bucket_name"],
+            "public_base_url": _r2_values["public_base_url"],
+        }
+        _storage_label = "R2"
+    else:
+        _storage_values = {
+            "endpoint_url": env("B2_ENDPOINT"),
+            "region": env("B2_REGION"),
+            "access_key_id": env("B2_KEY_ID"),
+            "secret_access_key": env("B2_APP_KEY"),
+            "bucket_name": env("B2_BUCKET"),
+            "public_base_url": env("B2_CDN_DOMAIN"),
+        }
+        _storage_label = "B2"
+
+    _required_storage_values = [
+        "endpoint_url",
+        "access_key_id",
+        "secret_access_key",
+        "bucket_name",
+        "public_base_url" if _use_r2 else "region",
+    ]
+    _missing_storage_values = [
+        name for name in _required_storage_values if not _storage_values[name]
+    ]
+    if _missing_storage_values:
+        raise ImproperlyConfigured(
+            f"{_storage_label} storage requires configured values for: "
+            + ", ".join(_missing_storage_values)
+        )
+
+    AWS_S3_ENDPOINT_URL = _storage_values["endpoint_url"]
+    AWS_S3_REGION_NAME = _storage_values["region"] or "auto"
+    AWS_ACCESS_KEY_ID = _storage_values["access_key_id"]
+    AWS_SECRET_ACCESS_KEY = _storage_values["secret_access_key"]
+    AWS_STORAGE_BUCKET_NAME = _storage_values["bucket_name"]
     AWS_S3_ADDRESSING_STYLE = "virtual"
-    AWS_S3_FILE_OVERWRITE = False
+    # Both upload paths include a UUID, so a name collision is effectively
+    # impossible. Avoiding django-storages' existence (HeadObject) check also
+    # means a write-only object-storage key can upload media.
+    AWS_S3_FILE_OVERWRITE = True
     AWS_DEFAULT_ACL = None
-    # Bypass machine-wide proxy variables for direct B2 uploads.  A stale
-    # localhost proxy otherwise makes botocore close the request before B2
-    # can respond.
-    AWS_S3_PROXIES = {}
 
-    # A public bucket serves plain urls that never expire, which is what the
-    # API contract promises. A private one has to sign every url instead:
-    # file_path then carries a signature and dies after B2_URL_EXPIRE_SECONDS,
-    # so it cannot be cached by the app or a CDN and must be re-fetched from
-    # the API before each use.
-    B2_SIGNED_URLS = env("B2_SIGNED_URLS")
-    AWS_QUERYSTRING_AUTH = B2_SIGNED_URLS
-    AWS_QUERYSTRING_EXPIRE = env("B2_URL_EXPIRE_SECONDS")
-
-    _cdn_domain = env("B2_CDN_DOMAIN")
-    if _cdn_domain:
-        if B2_SIGNED_URLS:
-            # storages builds the url from the custom domain and returns it
-            # unsigned (s3.py url()), so a CDN in front of a private bucket
-            # would serve 401s. Fail loudly rather than at request time.
+    if _use_r2:
+        _public_url = urlsplit(_storage_values["public_base_url"])
+        if _public_url.scheme != "https" or not _public_url.netloc:
             raise ImproperlyConfigured(
-                "B2_CDN_DOMAIN cannot be combined with B2_SIGNED_URLS: urls "
-                "built from a custom domain are never signed. Use a public "
-                "bucket with the CDN, or drop the CDN."
+                "R2_PUBLIC_BASE_URL must be an absolute HTTPS URL for the public bucket."
             )
-        AWS_S3_CUSTOM_DOMAIN = _cdn_domain
+        AWS_S3_CUSTOM_DOMAIN = _public_url.netloc + _public_url.path.rstrip("/")
+        AWS_S3_URL_PROTOCOL = "https:"
+        AWS_QUERYSTRING_AUTH = False
+    else:
+        # B2 may use unsigned public URLs or signed URLs for private buckets.
+        B2_SIGNED_URLS = env("B2_SIGNED_URLS")
+        AWS_QUERYSTRING_AUTH = B2_SIGNED_URLS
+        AWS_QUERYSTRING_EXPIRE = env("B2_URL_EXPIRE_SECONDS")
+
+        _cdn_domain = _storage_values["public_base_url"]
+        if _cdn_domain:
+            if B2_SIGNED_URLS:
+                # storages builds the url from the custom domain and returns it
+                # unsigned (s3.py url()), so a CDN in front of a private bucket
+                # would serve 401s. Fail loudly rather than at request time.
+                raise ImproperlyConfigured(
+                    "B2_CDN_DOMAIN cannot be combined with B2_SIGNED_URLS: urls "
+                    "built from a custom domain are never signed. Use a public "
+                    "bucket with the CDN, or drop the CDN."
+                )
+            AWS_S3_CUSTOM_DOMAIN = _cdn_domain
 
     STORAGES = {
         "default": {"BACKEND": "storages.backends.s3.S3Storage"},
